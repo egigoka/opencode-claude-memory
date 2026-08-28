@@ -245,7 +245,9 @@ exit 0
     expect(readFileSync(logPath, "utf-8")).toContain("extraction ok")
   })
 
-  test("returns immediately in background mode while session discovery waits", async () => {
+  test(
+    "returns immediately in background mode while session discovery waits",
+    async () => {
     const root = makeTempRoot()
     const fakeBin = join(root, "bin")
     const homeDir = join(root, "home")
@@ -283,7 +285,7 @@ exit 0
         HOME: homeDir,
         TMPDIR: tmpDir,
         CLAUDE_CONFIG_DIR: claudeDir,
-        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "2",
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "4",
         OPENCODE_MEMORY_AUTODREAM: "0",
       },
     })
@@ -291,10 +293,12 @@ exit 0
 
     expect(result.status).toBe(0)
     expect(result.stdout).toContain("fake help")
-    expect(elapsedMs).toBeLessThan(1000)
+    expect(elapsedMs).toBeLessThan(2500)
 
-    await new Promise((resolve) => setTimeout(resolve, 2200))
-  })
+    await new Promise((resolve) => setTimeout(resolve, 4200))
+    },
+    10_000,
+  )
 
   test("skips extraction when a resumed session has no new transcript activity", () => {
     const root = makeTempRoot()

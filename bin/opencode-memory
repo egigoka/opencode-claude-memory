@@ -1441,9 +1441,17 @@ fi
 if [ "$FOREGROUND" = "1" ]; then
   run_post_session_for_invocation
 else
-  run_post_session_for_invocation &
-  disown
-  log "Post-session memory maintenance started in background (PID $!)"
+  # Detach standard input unconditionally. When terminal logging is disabled,
+  # also detach output so callers using pipes/spawn do not wait for the
+  # maintenance child to close their descriptors.
+  if [ "$LOG_ENABLED" = "1" ]; then
+    run_post_session_for_invocation </dev/null &
+  else
+    run_post_session_for_invocation </dev/null >/dev/null 2>&1 &
+  fi
+  maintenance_pid=$!
+  disown "$maintenance_pid" 2>/dev/null || true
+  log "Post-session memory maintenance started in background (PID $maintenance_pid)"
 fi
 
 exit $opencode_exit
