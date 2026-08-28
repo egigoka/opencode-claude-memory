@@ -71,6 +71,61 @@ afterEach(() => {
 })
 
 describe("opencode-memory wrapper", () => {
+  test("uses plugin-free session discovery and falls back for older OpenCode builds", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const invocationLog = join(root, "invocations.log")
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${invocationLog}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  if [[ " $* " == *" --pure "* ]]; then
+    exit 2
+  fi
+  echo '[]'
+  exit 0
+fi
+if [ "\${1:-}" = "--help" ]; then
+  echo "fake help"
+fi
+exit 0
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "--help"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+        TMPDIR: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+        OPENCODE_MEMORY_FOREGROUND: "1",
+        OPENCODE_MEMORY_AUTODREAM: "0",
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("fake help")
+
+    const invocations = readFileSync(invocationLog, "utf-8").trim().split("\n")
+    const sessionLists = invocations.filter((line) => line.startsWith("session list"))
+    expect(sessionLists[0]).toBe("session list --format json -n 200 --pure")
+    expect(sessionLists).toContain("session list --format json -n 200")
+  })
+
   test("normalizes TMPDIR before composing extraction log paths", () => {
     const root = makeTempRoot()
     const fakeBin = join(root, "bin")
