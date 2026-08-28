@@ -102,7 +102,7 @@ exit 0
 `,
     )
 
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
@@ -118,12 +118,109 @@ exit 0
     })
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain("fake help")
 
     const invocations = readFileSync(invocationLog, "utf-8").trim().split("\n")
     const sessionLists = invocations.filter((line) => line.startsWith("session list"))
     expect(sessionLists[0]).toBe("session list --format json -n 200 --pure")
     expect(sessionLists).toContain("session list --format json -n 200")
+  })
+
+  test(
+    "captures pre-session state without another OpenCode runtime on the critical path",
+    async () => {
+      const root = makeTempRoot()
+      const fakeBin = join(root, "bin")
+      const homeDir = join(root, "home")
+      const tmpDir = join(root, "tmp")
+      const claudeDir = join(root, "claude")
+
+      mkdirSync(fakeBin, { recursive: true })
+      mkdirSync(homeDir, { recursive: true })
+      mkdirSync(tmpDir, { recursive: true })
+      mkdirSync(claudeDir, { recursive: true })
+      seedSessionDb(homeDir, [
+        {
+          id: "ses_existing",
+          title: "Existing session",
+          directory: root,
+          timeCreated: 1,
+          timeUpdated: 1,
+        },
+      ])
+
+      writeExecutable(
+        join(fakeBin, "opencode"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  sleep 4
+  echo '[]'
+  exit 0
+fi
+printf 'fake tui\\n'
+`,
+      )
+
+      const started = Date.now()
+      const result = spawnSync("bash", [scriptPath], {
+        cwd: root,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          HOME: homeDir,
+          TMPDIR: tmpDir,
+          CLAUDE_CONFIG_DIR: claudeDir,
+          OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "0",
+          OPENCODE_MEMORY_AUTODREAM: "0",
+        },
+      })
+      const elapsedMs = Date.now() - started
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain("fake tui")
+      expect(elapsedMs).toBeLessThan(2500)
+
+      await new Promise((resolve) => setTimeout(resolve, 4200))
+    },
+    10_000,
+  )
+
+  test("bypasses session maintenance for non-session OpenCode commands", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const invocationLog = join(root, "invocations.log")
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${invocationLog}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
+printf 'fake command\\n'
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "--print-logs", "models"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("fake command")
+    expect(readFileSync(invocationLog, "utf-8").trim().split("\n")).toEqual(["--print-logs models"])
+    expect(existsSync(join(homeDir, ".claude", "opencode-memory"))).toBe(false)
   })
 
   test("normalizes TMPDIR before composing extraction log paths", () => {
@@ -158,7 +255,7 @@ exit 0
 `,
     )
 
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
@@ -218,7 +315,7 @@ exit 0
 `,
     )
 
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
@@ -276,7 +373,7 @@ exit 0
     )
 
     const started = Date.now()
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
@@ -292,7 +389,6 @@ exit 0
     const elapsedMs = Date.now() - started
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain("fake help")
     expect(elapsedMs).toBeLessThan(2500)
 
     await new Promise((resolve) => setTimeout(resolve, 4200))
@@ -339,7 +435,7 @@ exit 0
 `,
     )
 
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
@@ -355,7 +451,6 @@ exit 0
     })
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain("fake help")
     expect(existsSync(stateFile)).toBe(false)
   })
 
@@ -482,7 +577,7 @@ exit 0
 `,
     )
 
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
@@ -1133,27 +1228,13 @@ exit 127
     const deleteLog = join(root, "delete-log")
     const stateFile = join(root, "state")
     const futureBaseMs = Date.now() + 60_000
-    seedSessionDb(homeDir, [
+    const dbPath = seedSessionDb(homeDir, [
       {
-        id: "ses_wrapped_target",
-        title: "Wrapped Main Task",
+        id: "ses_existing_old",
+        title: "Existing Session",
         directory: root,
         timeCreated: 1,
         timeUpdated: 1,
-      },
-      {
-        id: "ses_fork_cleanup_target",
-        title: "Wrapped Main Task (fork #1)",
-        directory: root,
-        timeCreated: futureBaseMs,
-        timeUpdated: futureBaseMs,
-      },
-      {
-        id: "ses_parallel_real",
-        title: "Parallel normal session",
-        directory: root,
-        timeCreated: futureBaseMs + 1000,
-        timeUpdated: futureBaseMs + 1000,
       },
     ])
 
@@ -1187,6 +1268,18 @@ if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
   exit 0
 fi
 if [ "\${1:-}" != "session" ] && ! { [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; }; then
+  python3 - "${dbPath}" "${root}" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "INSERT INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
+    ("ses_wrapped_target", None, sys.argv[2], "Wrapped Main Task", 20, 20),
+)
+conn.commit()
+conn.close()
+PY
   echo wrapped > "$STATE_FILE"
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
   printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
@@ -1194,6 +1287,23 @@ if [ "\${1:-}" != "session" ] && ! { [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s"
   exit 0
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  python3 - "${dbPath}" "${root}" "${futureBaseMs}" <<'PY'
+import sqlite3
+import sys
+
+db_path, directory, base_raw = sys.argv[1:4]
+base = int(base_raw)
+conn = sqlite3.connect(db_path)
+conn.executemany(
+    "INSERT INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
+    [
+        ("ses_fork_cleanup_target", "ses_wrapped_target", directory, "Wrapped Main Task (fork #1)", base, base),
+        ("ses_parallel_real", None, directory, "Parallel normal session", base + 1000, base + 1000),
+    ],
+)
+conn.commit()
+conn.close()
+PY
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
   printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
   sleep 1
@@ -1205,7 +1315,7 @@ exit 0
 `,
     )
 
-    const result = spawnSync("bash", [scriptPath, "--help"], {
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
       cwd: root,
       encoding: "utf-8",
       env: {
