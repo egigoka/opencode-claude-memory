@@ -448,6 +448,19 @@ get_session_list_json() {
   local limit="$1"
   local output
 
+  # Session metadata does not need user plugins. Prefer plugin-free discovery so
+  # the wrapper does not initialize the full OpenCode runtime before launching
+  # the interactive process. Fall back for older OpenCode builds without --pure.
+  if output=$("$REAL_OPENCODE" session list --format json -n "$limit" --pure 2>/dev/null); then
+    echo "$output"
+    return 0
+  fi
+
+  if output=$("$REAL_OPENCODE" session list --format json --pure 2>/dev/null); then
+    echo "$output"
+    return 0
+  fi
+
   if output=$("$REAL_OPENCODE" session list --format json -n "$limit" 2>/dev/null); then
     echo "$output"
     return 0
