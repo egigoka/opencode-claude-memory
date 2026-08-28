@@ -231,6 +231,46 @@ is_opencode_subcommand() {
   esac
 }
 
+is_maintenance_free_invocation() {
+  local arg
+  local expect_value=0
+
+  for arg in "$@"; do
+    if [ "$expect_value" = "1" ]; then
+      expect_value=0
+      continue
+    fi
+
+    case "$arg" in
+      -h|--help|-v|--version)
+        return 0
+        ;;
+      --log-level|--port|--hostname|--mdns-domain|--cors|-m|--model|-s|--session|--prompt|--agent|--dir)
+        expect_value=1
+        ;;
+      --*=*|--print-logs|--pure|--mdns|--auto|--mini|--no-replay|--fork|-c|--continue)
+        ;;
+      --)
+        return 1
+        ;;
+      -*)
+        ;;
+      completion|mcp|debug|providers|auth|agent|upgrade|models|stats|export|import|session|plugin|plug|db)
+        return 0
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+if is_maintenance_free_invocation "$@"; then
+  exec "$REAL_OPENCODE" "$@"
+fi
+
 extract_working_dir_from_args() {
   local previous=""
   for arg in "$@"; do
@@ -442,6 +482,72 @@ has_new_memories() {
 
 cleanup_timestamp() {
   rm -f "$TIMESTAMP_FILE" "${TRANSCRIPT_CHECKPOINT_FILE:-}"
+}
+
+get_session_list_json_from_db() {
+  local limit="$1"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" "${OPENCODE_DB:-}" "$limit" <<'PY'
+import glob
+import json
+import os
+import sqlite3
+import sys
+
+data_dir, configured_db, limit_raw = sys.argv[1:4]
+try:
+    limit = max(1, int(limit_raw))
+except ValueError:
+    raise SystemExit(1)
+
+if configured_db:
+    if configured_db == ":memory:":
+        raise SystemExit(1)
+    paths = [configured_db if os.path.isabs(configured_db) else os.path.join(data_dir, configured_db)]
+else:
+    paths = glob.glob(os.path.join(data_dir, "opencode*.db"))
+
+compatible = False
+rows_by_id = {}
+for path in paths:
+    if not os.path.isfile(path):
+        continue
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.1)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
+        required = {"id", "directory", "time_created", "time_updated"}
+        if not required.issubset(columns):
+            continue
+        compatible = True
+        for session_id, directory, created, updated in conn.execute(
+            "SELECT id, directory, time_created, time_updated FROM session ORDER BY time_updated DESC LIMIT ?",
+            (limit,),
+        ):
+            item = {
+                "id": session_id,
+                "directory": directory,
+                "time": {"created": created, "updated": updated},
+            }
+            previous = rows_by_id.get(session_id)
+            if previous is None or (updated or 0) > (previous["time"]["updated"] or 0):
+                rows_by_id[session_id] = item
+    except (OSError, sqlite3.Error):
+        continue
+    finally:
+        if conn is not None:
+            conn.close()
+
+if not compatible:
+    raise SystemExit(1)
+
+rows = sorted(rows_by_id.values(), key=lambda item: item["time"]["updated"] or 0, reverse=True)[:limit]
+print(json.dumps(rows, separators=(",", ":")))
+PY
 }
 
 get_session_list_json() {
@@ -1421,7 +1527,8 @@ TIMESTAMP_FILE=$(mktemp)
 TRANSCRIPT_CHECKPOINT_FILE=$(mktemp)
 write_transcript_checkpoint "$TRANSCRIPT_CHECKPOINT_FILE"
 SESSION_CAPTURE_STARTED_AT_MS=$(( $(date +%s) * 1000 ))
-PRE_SESSION_JSON=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
+PRE_SESSION_JSON=$(get_session_list_json_from_db "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || \
+  get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
 
 # Step 1: Run the real opencode with all original arguments, capture exit code
 opencode_exit=0
